@@ -11,6 +11,18 @@
         body { margin: 0; }
         #map { height: 100vh; }
 
+        .panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: white;
+            padding: 10px;
+            z-index: 1000;
+            border-radius: 8px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
         .legend {
             background: white;
             padding: 10px;
@@ -30,25 +42,29 @@
 
 <div id="map"></div>
 
+<!-- PAINEL -->
+<div class="panel">
+    <b>Camadas</b><br>
+    <div id="layer-controls"></div>
+</div>
+
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
 <script>
 const map = L.map('map').setView([-22.9, -47.06], 11);
 
 // ---------------------------
-// BASEMAPS (TODOS)
+// BASEMAPS
 // ---------------------------
 const basemaps = {
-    "OpenStreetMap": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'),
-    "Satélite (Esri)": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'),
-    "CartoDB Positron": L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'),
-    "CartoDB Dark": L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png')
+    "OSM": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'),
+    "Satélite": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}')
 };
 
-basemaps["OpenStreetMap"].addTo(map);
+basemaps["OSM"].addTo(map);
 
 // ---------------------------
-// TODAS AS CAMADAS (PORTADAS)
+// CAMADAS
 // ---------------------------
 const layersConfig = {
     "Limite": {asset: "projects/ee-rogergodoytest/assets/limite_municipal", color: "000000"},
@@ -66,29 +82,62 @@ let overlays = {};
 // ---------------------------
 // CARREGAR CAMADAS
 // ---------------------------
-async function loadLayer(name, config) {
+async function createLayer(name, config) {
     const res = await fetch(`/tile?asset_id=${config.asset}&palette=${config.color}&is_point=${config.point || false}`);
     const data = await res.json();
 
     if (data.url) {
-        const layer = L.tileLayer(data.url);
-        overlays[name] = layer;
-        layer.addTo(map);
+        overlays[name] = L.tileLayer(data.url);
     }
 }
 
-// carregar todas
-for (const [name, config] of Object.entries(layersConfig)) {
-    loadLayer(name, config);
+// inicializa todas
+async function initLayers() {
+    for (const [name, config] of Object.entries(layersConfig)) {
+        await createLayer(name, config);
+    }
+
+    createLayerControls();
+}
+
+initLayers();
+
+// ---------------------------
+// CHECKBOX UI
+// ---------------------------
+function createLayerControls() {
+    const container = document.getElementById("layer-controls");
+
+    for (const name in overlays) {
+        const div = document.createElement("div");
+
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = true;
+
+        checkbox.onchange = function() {
+            if (this.checked) {
+                overlays[name].addTo(map);
+            } else {
+                map.removeLayer(overlays[name]);
+            }
+        };
+
+        // adiciona por padrão
+        overlays[name].addTo(map);
+
+        const label = document.createElement("label");
+        label.innerHTML = `<span style="background:#${layersConfig[name].color}; width:10px; height:10px; display:inline-block;"></span> ${name}`;
+
+        div.appendChild(checkbox);
+        div.appendChild(label);
+
+        container.appendChild(div);
+    }
 }
 
 // ---------------------------
-// CONTROLE
-// ---------------------------
-L.control.layers(basemaps, overlays).addTo(map);
-
-// ---------------------------
-// LEGENDA DINÂMICA
+// LEGENDA
 // ---------------------------
 const legend = L.control({position: "bottomleft"});
 
@@ -105,6 +154,19 @@ legend.onAdd = function () {
 };
 
 legend.addTo(map);
+
+// ---------------------------
+// CLICK NO MAPA → INFO
+// ---------------------------
+map.on('click', function(e) {
+    const lat = e.latlng.lat.toFixed(6);
+    const lng = e.latlng.lng.toFixed(6);
+
+    L.popup()
+        .setLatLng(e.latlng)
+        .setContent(`<b>Coordenadas</b><br>Lat: ${lat}<br>Lon: ${lng}`)
+        .openOn(map);
+});
 </script>
 
 </body>
