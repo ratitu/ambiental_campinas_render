@@ -82,15 +82,24 @@ let overlays = {};
 // ---------------------------
 // CARREGAR CAMADAS
 // ---------------------------
+const tileCache = {};
 async function createLayer(name, config) {
+
+    const key = `${config.asset}_${config.color}_${config.point}`;
+
+    if (tileCache[key]) {
+        overlays[name] = L.tileLayer(tileCache[key]);
+        return;
+    }
+
     const res = await fetch(`/tile?asset_id=${config.asset}&palette=${config.color}&is_point=${config.point || false}`);
     const data = await res.json();
 
     if (data.url) {
+        tileCache[key] = data.url;
         overlays[name] = L.tileLayer(data.url);
     }
 }
-
 // inicializa todas
 async function initLayers() {
     for (const [name, config] of Object.entries(layersConfig)) {
