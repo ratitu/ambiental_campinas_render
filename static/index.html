@@ -15,6 +15,7 @@
             background: white;
             padding: 10px;
             border-radius: 8px;
+            font-size: 14px;
         }
 
         .legend span {
@@ -23,25 +24,11 @@
             height: 12px;
             margin-right: 6px;
         }
-
-        .controls {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: white;
-            padding: 10px;
-            z-index: 1000;
-            border-radius: 8px;
-        }
     </style>
 </head>
 <body>
 
 <div id="map"></div>
-
-<div class="controls">
-    <button onclick="exportLayer()">Exportar GeoTIFF</button>
-</div>
 
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
@@ -49,42 +36,59 @@
 const map = L.map('map').setView([-22.9, -47.06], 11);
 
 // ---------------------------
-// BASEMAPS
+// BASEMAPS (TODOS)
 // ---------------------------
 const basemaps = {
-    "OSM": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'),
-    "Satélite": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}')
+    "OpenStreetMap": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'),
+    "Satélite (Esri)": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'),
+    "CartoDB Positron": L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'),
+    "CartoDB Dark": L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png')
 };
 
-basemaps["OSM"].addTo(map);
+basemaps["OpenStreetMap"].addTo(map);
 
 // ---------------------------
-// LAYERS
+// TODAS AS CAMADAS (PORTADAS)
 // ---------------------------
 const layersConfig = {
+    "Limite": {asset: "projects/ee-rogergodoytest/assets/limite_municipal", color: "000000"},
+    "APA": {asset: "projects/ee-pigee/assets/UnidadesConservacaoCampinas", color: "3AF40B"},
+    "APP": {asset: "projects/ee-pigee/assets/areaPreservacaoPermanente", color: "f1fc07"},
+    "Amortecimento": {asset: "projects/ee-pigee/assets/zonasAmortecimento", color: "f50618"},
+    "Nascentes": {asset: "projects/ee-pigee/assets/nascentes_campinas", color: "13f2f9", point: true},
     "Hidrografia": {asset: "projects/ee-pigee/assets/hidrografia_campinas", color: "031fbb"},
-    "Nascentes": {asset: "projects/ee-pigee/assets/nascentes_campinas", color: "13f2f9", point: true}
+    "HIDS": {asset: "projects/ee-pigee/assets/hids", color: "fa9e09"},
+    "PIDS": {asset: "projects/ee-pigee/assets/hids_pids", color: "d488de"}
 };
 
 let overlays = {};
 
+// ---------------------------
+// CARREGAR CAMADAS
+// ---------------------------
 async function loadLayer(name, config) {
     const res = await fetch(`/tile?asset_id=${config.asset}&palette=${config.color}&is_point=${config.point || false}`);
     const data = await res.json();
 
-    const layer = L.tileLayer(data.url);
-    overlays[name] = layer;
-    layer.addTo(map);
+    if (data.url) {
+        const layer = L.tileLayer(data.url);
+        overlays[name] = layer;
+        layer.addTo(map);
+    }
 }
 
+// carregar todas
 for (const [name, config] of Object.entries(layersConfig)) {
     loadLayer(name, config);
 }
 
+// ---------------------------
+// CONTROLE
+// ---------------------------
 L.control.layers(basemaps, overlays).addTo(map);
 
 // ---------------------------
-// LEGEND
+// LEGENDA DINÂMICA
 // ---------------------------
 const legend = L.control({position: "bottomleft"});
 
@@ -92,6 +96,7 @@ legend.onAdd = function () {
     const div = L.DomUtil.create("div", "legend");
 
     div.innerHTML = "<b>Legenda</b><br>";
+
     for (const [name, config] of Object.entries(layersConfig)) {
         div.innerHTML += `<div><span style="background:#${config.color}"></span>${name}</div>`;
     }
@@ -100,19 +105,6 @@ legend.onAdd = function () {
 };
 
 legend.addTo(map);
-
-// ---------------------------
-// EXPORT
-// ---------------------------
-function exportLayer() {
-    const asset = "projects/ee-pigee/assets/hidrografia_campinas";
-
-    fetch(`/export?asset_id=${asset}`)
-        .then(res => res.json())
-        .then(data => {
-            window.open(data.download_url, "_blank");
-        });
-}
 </script>
 
 </body>
