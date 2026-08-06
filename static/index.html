@@ -23,6 +23,43 @@
             overflow-y: auto;
         }
 
+        #banner {
+            display: none;
+            background: #ffe0e0;
+            border: 1px solid #e00000;
+            color: #a00;
+            padding: 8px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+
+        .layer-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin: 4px 0;
+        }
+
+        .layer-status {
+            font-size: 12px;
+            min-width: 60px;
+        }
+        .layer-status.loading { color: #888; }
+        .layer-status.error { color: #c00; font-weight: bold; }
+
+        .layer-opacity {
+            width: 50px;
+            margin-left: auto;
+        }
+
+        .swatch {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            margin-right: 4px;
+        }
+
         .legend {
             background: white;
             padding: 10px;
@@ -44,7 +81,8 @@
 
 <!-- PAINEL -->
 <div class="panel">
-    <b>Camadas</b><br>
+    <b>Camadas</b>
+    <div id="banner">Serviço indisponível — verifique a configuração do GEE.</div>
     <div id="layer-controls"></div>
 </div>
 
@@ -77,73 +115,190 @@ const layersConfig = {
     "PIDS": {asset: "projects/ee-pigee/assets/hids_pids", color: "d488de"}
 };
 
-let overlays = {};
+const TILE_TTL_MS = 20 * 3600 * 1000;      // URLs do GEE expiram em ~1 dia
+const REFRESH_COOLDOWN_MS = 5 * 60 * 1000; // evita loop de recarga em falha
+const DEFAULT_LAYERS = ["Limite", "Hidrografia"];
+
+const tileCache = {};    // tileCacheKey -> {url, fetchedAt}
+const layerState = {};   // name -> {promise, layer}
+const lastRefresh = {};  // name -> timestamp
+const controls = {};     // name -> {checkbox, status, opacity}
 
 // ---------------------------
-// CARREGAR CAMADAS
+// HELPERS
 // ---------------------------
-const tileCache = {};
-async function createLayer(name, config) {
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
 
-    const key = `${config.asset}_${config.color}_${config.point}`;
+function formatValue(v) {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return v;
+}
 
-    if (tileCache[key]) {
-        overlays[name] = L.tileLayer(tileCache[key]);
-        return;
+function tileCacheKey(config) {
+    return `${config.asset}_${config.color}_${config.point}`;
+}
+
+// ---------------------------
+// CARGA LAZY + RECARGA QUANDO EXPIRA
+// ---------------------------
+function fetchTileUrl(config) {
+    const key = tileCacheKey(config);
+    const cached = tileCache[key];
+    if (cached && Date.now() - cached.fetchedAt < TILE_TTL_MS) {
+        return Promise.resolve(cached.url);
     }
 
-    const res = await fetch(`/tile?asset_id=${config.asset}&palette=${config.color}&is_point=${config.point || false}`);
-    const data = await res.json();
+    const qs = new URLSearchParams({
+        asset_id: config.asset,
+        palette: config.color,
+        is_point: String(config.point === true),
+    });
 
-    if (data.url) {
-        tileCache[key] = data.url;
-        overlays[name] = L.tileLayer(data.url);
+    return fetch(`/tile?${qs}`).then(async res => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.url) {
+            const err = new Error(data.detail || `HTTP ${res.status}`);
+            err.status = res.status;
+            throw err;
+        }
+        tileCache[key] = {url: data.url, fetchedAt: Date.now()};
+        return data.url;
+    });
+}
+
+function makeTileLayer(url, name, config) {
+    const layer = L.tileLayer(url);
+    layer.on('tileerror', () => refreshLayer(name, config));
+    return layer;
+}
+
+function loadLayer(name, config) {
+    const st = layerState[name];
+    if (st && st.promise) return st.promise;
+
+    const promise = fetchTileUrl(config)
+        .then(url => {
+            const layer = makeTileLayer(url, name, config);
+            layerState[name] = {promise, layer};
+            return layer;
+        })
+        .catch(err => {
+            delete layerState[name];
+            throw err;
+        });
+
+    layerState[name] = {promise, layer: null};
+    return promise;
+}
+
+function refreshLayer(name, config) {
+    const st = layerState[name];
+    if (!st || !st.layer) return;
+
+    const now = Date.now();
+    if (now - (lastRefresh[name] || 0) < REFRESH_COOLDOWN_MS) return;
+    lastRefresh[name] = now;
+
+    delete tileCache[tileCacheKey(config)];
+    const old = st.layer;
+
+    fetchTileUrl(config)
+        .then(url => {
+            const fresh = makeTileLayer(url, name, config);
+            fresh.setOpacity(old.options.opacity || 1);
+            if (map.hasLayer(old)) {
+                map.removeLayer(old);
+                fresh.addTo(map);
+            }
+            layerState[name].layer = fresh;
+        })
+        .catch(() => {});
+}
+
+// ---------------------------
+// UI DE CAMADAS (checkbox + status + opacidade)
+// ---------------------------
+const container = document.getElementById("layer-controls");
+
+async function enableLayer(name, config, ctrl) {
+    const {checkbox, status, opacity} = ctrl;
+    if (checkbox.checked) {
+        status.textContent = 'carregando…';
+        status.className = 'layer-status loading';
+        try {
+            const layer = await loadLayer(name, config);
+            layer.setOpacity(opacity.value / 100);
+            if (checkbox.checked) map.addLayer(layer);
+            status.textContent = '';
+            status.className = 'layer-status';
+        } catch (err) {
+            status.textContent = 'falha';
+            status.className = 'layer-status error';
+            checkbox.checked = false;
+        }
+    } else {
+        const st = layerState[name];
+        if (st && st.layer && map.hasLayer(st.layer)) map.removeLayer(st.layer);
     }
 }
-// inicializa todas
-async function initLayers() {
+
+function buildControls() {
+    container.innerHTML = '';
     for (const [name, config] of Object.entries(layersConfig)) {
-        await createLayer(name, config);
-    }
-
-    createLayerControls();
-}
-
-initLayers();
-
-// ---------------------------
-// CHECKBOX UI
-// ---------------------------
-function createLayerControls() {
-    const container = document.getElementById("layer-controls");
-
-    for (const name in overlays) {
         const div = document.createElement("div");
+        div.className = "layer-row";
 
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
-        checkbox.checked = true;
-
-        checkbox.onchange = function() {
-            if (this.checked) {
-                overlays[name].addTo(map);
-            } else {
-                map.removeLayer(overlays[name]);
-            }
-        };
-
-        // adiciona por padrão
-        overlays[name].addTo(map);
 
         const label = document.createElement("label");
-        label.innerHTML = `<span style="background:#${layersConfig[name].color}; width:10px; height:10px; display:inline-block;"></span> ${name}`;
+        label.innerHTML = `<span class="swatch" style="background:#${config.color}"></span> ${escapeHtml(name)}`;
+
+        const status = document.createElement("span");
+        status.className = "layer-status";
+
+        const opacity = document.createElement("input");
+        opacity.type = "range";
+        opacity.min = "0";
+        opacity.max = "100";
+        opacity.value = "100";
+        opacity.className = "layer-opacity";
+        opacity.title = "Opacidade";
+
+        checkbox.addEventListener("change", () => enableLayer(name, config, controls[name]));
+        opacity.addEventListener("input", () => {
+            const st = layerState[name];
+            if (st && st.layer) st.layer.setOpacity(opacity.value / 100);
+        });
 
         div.appendChild(checkbox);
         div.appendChild(label);
-
+        div.appendChild(status);
+        div.appendChild(opacity);
         container.appendChild(div);
+
+        controls[name] = {checkbox, status, opacity};
+    }
+
+    // camadas ligadas por padrão (carregadas sob demanda)
+    for (const name of DEFAULT_LAYERS) {
+        if (controls[name]) enableLayer(name, layersConfig[name], controls[name]);
     }
 }
+
+buildControls();
+
+// ---------------------------
+// HEALTH CHECK → BANNER
+// ---------------------------
+fetch('/healthz')
+    .then(r => { if (!r.ok) document.getElementById('banner').style.display = 'block'; })
+    .catch(() => {});
 
 // ---------------------------
 // LEGENDA
@@ -165,16 +320,55 @@ legend.onAdd = function () {
 legend.addTo(map);
 
 // ---------------------------
-// CLICK NO MAPA → INFO
+// CLICK NO MAPA → COORDENADAS + ATRIBUTOS
 // ---------------------------
-map.on('click', function(e) {
-    const lat = e.latlng.lat.toFixed(6);
-    const lng = e.latlng.lng.toFixed(6);
+async function buildInfoPopup(lat, lon) {
+    const header = `<b>Coordenadas</b><br>Lat: ${lat.toFixed(6)}<br>Lon: ${lon.toFixed(6)}`;
 
+    const enabled = Object.entries(layersConfig).filter(([name]) => {
+        const st = layerState[name];
+        return st && st.layer && map.hasLayer(st.layer);
+    });
+    if (enabled.length === 0) return header;
+
+    const results = await Promise.all(enabled.map(async ([name, config]) => {
+        try {
+            const qs = new URLSearchParams({asset_id: config.asset, lat, lon});
+            const res = await fetch(`/info?${qs}`);
+            const data = await res.json();
+            return {name, config, properties: res.ok ? data.properties : null};
+        } catch {
+            return {name, config, properties: null};
+        }
+    }));
+
+    let any = false;
+    let html = header;
+    for (const {name, config, properties} of results) {
+        if (!properties || Object.keys(properties).length === 0) continue;
+        any = true;
+        const attrs = Object.entries(properties)
+            .slice(0, 5)
+            .map(([k, v]) => `<b>${escapeHtml(k)}</b>: ${escapeHtml(formatValue(v))}`)
+            .join('<br>');
+        html += `<br><br><span class="swatch" style="background:#${config.color}"></span> <b>${escapeHtml(name)}</b><br>${attrs}`;
+    }
+    if (!any) html += '<br><br><i>sem dados</i>';
+    return html;
+}
+
+let popupBusy = false;
+map.on('click', async function (e) {
+    if (popupBusy) return;
+    popupBusy = true;
+    const lat = e.latlng.lat;
+    const lon = e.latlng.lng;
+    const html = await buildInfoPopup(lat, lon);
     L.popup()
         .setLatLng(e.latlng)
-        .setContent(`<b>Coordenadas</b><br>Lat: ${lat}<br>Lon: ${lng}`)
+        .setContent(html)
         .openOn(map);
+    popupBusy = false;
 });
 </script>
 
